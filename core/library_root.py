@@ -182,23 +182,55 @@ def build_import_records(
     return records
 
 
+def summarize_library_changes(previous_records: List[Dict], new_records: List[Dict]) -> Dict:
+    previous_by_id = {
+        str(record.get("workshop_id")): {
+            "workshop_id": str(record.get("workshop_id")),
+            "title": record.get("title"),
+        }
+        for record in previous_records
+    }
+    new_by_id = {
+        str(record.get("workshop_id")): {
+            "workshop_id": str(record.get("workshop_id")),
+            "title": record.get("title"),
+        }
+        for record in new_records
+    }
+    previous_ids = set(previous_by_id)
+    new_ids = set(new_by_id)
+    added_ids = sorted(new_ids - previous_ids)
+    removed_ids = sorted(previous_ids - new_ids)
+    return {
+        "added_ids": added_ids,
+        "removed_ids": removed_ids,
+        "added_mods": [new_by_id[workshop_id] for workshop_id in added_ids],
+        "removed_mods": [previous_by_id[workshop_id] for workshop_id in removed_ids],
+        "added_count": len(added_ids),
+        "removed_count": len(removed_ids),
+    }
+
+
 def rebuild_database_from_library_root(
     db_path: str,
     library_root: str,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     log_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict:
+    db = ModDatabase(db_path)
+    previous_records = db.list_all_mods()
     records = build_import_records(
         library_root,
         progress_callback=progress_callback,
         log_callback=log_callback,
     )
-    db = ModDatabase(db_path)
+    changes = summarize_library_changes(previous_records, records)
     if not db.replace_all_mods(records):
         raise RuntimeError("Failed to rebuild database from the selected library root.")
     return {
         "imported_count": len(records),
         "records": records,
+        "changes": changes,
     }
 
 
@@ -230,6 +262,7 @@ def switch_library_root(
         return {
             "library_root": str(new_root),
             "imported_count": rebuild_result["imported_count"],
+            "changes": rebuild_result["changes"],
             "changed": False,
         }
 
@@ -261,6 +294,7 @@ def switch_library_root(
         return {
             "library_root": str(new_root),
             "imported_count": rebuild_result["imported_count"],
+            "changes": rebuild_result["changes"],
             "changed": True,
         }
     except Exception:

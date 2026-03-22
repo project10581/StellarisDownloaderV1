@@ -4,18 +4,24 @@ from core.workshop_api import fetch_mod_metadata
 from core.steamcmd import download_mod
 from core.database import ModDatabase
 
-def check_mod_for_updates(workshop_id: str, stored_remote_updated_at: Optional[int]) -> Dict:
+def check_mod_for_updates(
+    workshop_id: str,
+    stored_remote_updated_at: Optional[int],
+    last_downloaded_at: Optional[int] = None,
+) -> Dict:
     """
     Check if a single mod has updates available.
 
     Args:
         workshop_id: Steam Workshop ID
-        stored_remote_updated_at: Stored timestamp from last successful download
+        stored_remote_updated_at: Stored remote timestamp from last known metadata
+        last_downloaded_at: Stored local download/import timestamp
 
     Returns:
         Dict with keys:
             - workshop_id: str
             - stored_remote_updated_at: Optional[int]
+            - last_downloaded_at: Optional[int]
             - latest_remote_updated_at: Optional[int]
             - status: "up_to_date" | "update_available" | "failed_check"
             - latest_title: Optional[str]
@@ -28,6 +34,7 @@ def check_mod_for_updates(workshop_id: str, stored_remote_updated_at: Optional[i
             return {
                 "workshop_id": workshop_id,
                 "stored_remote_updated_at": stored_remote_updated_at,
+                "last_downloaded_at": last_downloaded_at,
                 "latest_remote_updated_at": None,
                 "latest_title": None,
                 "status": "failed_check",
@@ -37,13 +44,18 @@ def check_mod_for_updates(workshop_id: str, stored_remote_updated_at: Optional[i
         latest_remote_updated_at = metadata.get("remote_updated_at")
         latest_title = metadata.get("title")
         
-        # Determine update status
-        if stored_remote_updated_at is None:
-            status = "unknown_state"
-            error_msg = "Stored remote_updated_at missing; cannot determine update status"
-        elif latest_remote_updated_at is None:
+        # Determine update status. Prefer comparing the latest workshop update time
+        # against the local download/import timestamp because DB rebuild/import can
+        # legitimately refresh stored_remote_updated_at from Steam metadata.
+        if latest_remote_updated_at is None:
             status = "failed_check"
             error_msg = "Latest metadata missing remote_updated_at"
+        elif last_downloaded_at is not None:
+            status = "update_available" if latest_remote_updated_at > last_downloaded_at else "up_to_date"
+            error_msg = None
+        elif stored_remote_updated_at is None:
+            status = "unknown_state"
+            error_msg = "Stored timestamps missing; cannot determine update status"
         elif latest_remote_updated_at > stored_remote_updated_at:
             status = "update_available"
             error_msg = None
@@ -54,6 +66,7 @@ def check_mod_for_updates(workshop_id: str, stored_remote_updated_at: Optional[i
         return {
             "workshop_id": workshop_id,
             "stored_remote_updated_at": stored_remote_updated_at,
+            "last_downloaded_at": last_downloaded_at,
             "latest_remote_updated_at": latest_remote_updated_at,
             "latest_title": latest_title,
             "status": status,
@@ -64,6 +77,7 @@ def check_mod_for_updates(workshop_id: str, stored_remote_updated_at: Optional[i
         return {
             "workshop_id": workshop_id,
             "stored_remote_updated_at": stored_remote_updated_at,
+            "last_downloaded_at": last_downloaded_at,
             "latest_remote_updated_at": None,
             "latest_title": None,
             "status": "failed_check",
@@ -84,8 +98,9 @@ def check_all_mods_for_updates(mods: List[Dict]) -> List[Dict]:
     for mod in mods:
         workshop_id = mod['workshop_id']
         stored_remote_updated_at = mod.get('remote_updated_at')
+        last_downloaded_at = mod.get('last_downloaded_at')
         
-        result = check_mod_for_updates(workshop_id, stored_remote_updated_at)
+        result = check_mod_for_updates(workshop_id, stored_remote_updated_at, last_downloaded_at)
         results.append(result)
     
     return results

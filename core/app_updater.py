@@ -195,6 +195,13 @@ def launch_updater_for_package(package_path: Path) -> None:
     helper_runtime_path = staging_root / UPDATER_EXE_NAME
     shutil.copy2(helper_source, helper_runtime_path)
 
+    # The updater helper is packaged in one-folder mode and depends on its
+    # sibling runtime directory. Copy that staged runtime too before launch.
+    internal_source = install_root / "_internal"
+    internal_target = staging_root / "_internal"
+    if internal_source.exists():
+        shutil.copytree(internal_source, internal_target, dirs_exist_ok=True)
+
     app_executable = Path(sys.executable).resolve()
     arguments = [
         str(helper_runtime_path),

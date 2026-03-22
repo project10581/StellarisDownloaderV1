@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 import logging
+import subprocess
 import shutil
 import sys
 import tempfile
@@ -90,6 +91,32 @@ def restart_app(install_dir: Path, app_exe_name: str) -> None:
         raise RuntimeError(f"Failed to restart the updated app (ShellExecute result: {result}).")
 
 
+def cleanup_downloaded_package(zip_path: Path) -> None:
+    try:
+        if zip_path.exists():
+            zip_path.unlink()
+            logging.info("Deleted downloaded update package: %s", zip_path)
+    except Exception:
+        logging.exception("Failed to delete downloaded update package: %s", zip_path)
+
+
+def schedule_staging_cleanup(staging_root: Path) -> None:
+    try:
+        if not staging_root.exists():
+            return
+        subprocess.Popen(
+            [
+                "cmd",
+                "/c",
+                f'ping 127.0.0.1 -n 4 > nul & rmdir /s /q "{staging_root}"',
+            ],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        logging.info("Scheduled staging cleanup for %s", staging_root)
+    except Exception:
+        logging.exception("Failed to schedule staging cleanup for %s", staging_root)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--parent-pid", required=True, type=int)
@@ -117,6 +144,8 @@ def main() -> int:
             replace_installation(install_dir, staged_dir)
 
         restart_app(install_dir, args.app_exe_name)
+        cleanup_downloaded_package(zip_path)
+        schedule_staging_cleanup(Path(sys.executable).resolve().parent)
         logging.info("Updater helper completed successfully.")
         return 0
     except Exception as exc:

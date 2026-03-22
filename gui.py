@@ -2,6 +2,7 @@ import logging
 import sys
 import os
 import json
+import shutil
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -84,6 +85,101 @@ class AppUpdateDownloadThread(QThread):
             self.error.emit(str(e))
 
 
+class AppUpdateAvailableDialog(QDialog):
+    def __init__(self, current_version, latest_version, release_notes, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("dialog_app_update_available"))
+        self.setModal(True)
+        self.resize(430, 210)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        version_label = QLabel(
+            tr("info_app_update_available_message").format(
+                current_version=current_version,
+                latest_version=latest_version,
+            )
+        )
+        version_label.setWordWrap(True)
+        layout.addWidget(version_label)
+
+        restart_label = QLabel(tr("info_update_will_restart_message"))
+        restart_label.setWordWrap(True)
+        layout.addWidget(restart_label)
+
+        notes_label = QLabel(tr("info_app_update_notes_label"))
+        layout.addWidget(notes_label)
+
+        self.notes_text = QTextEdit()
+        self.notes_text.setReadOnly(True)
+        self.notes_text.setPlainText((release_notes or "").strip())
+        self.notes_text.setMinimumHeight(52)
+        self.notes_text.setMaximumHeight(72)
+        layout.addWidget(self.notes_text, 1)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        self.update_now_button = QPushButton(tr("button_update_now"))
+        self.update_now_button.clicked.connect(self.accept)
+        button_layout.addWidget(self.update_now_button)
+
+        self.later_button = QPushButton(tr("button_later"))
+        self.later_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.later_button)
+
+        layout.addLayout(button_layout)
+
+
+class LibraryReloadChangesDialog(QDialog):
+    def __init__(self, changes, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("dialog_library_reload_changes"))
+        self.setModal(True)
+        self.resize(640, 360)
+
+        layout = QVBoxLayout(self)
+
+        summary_label = QLabel(
+            tr("info_library_reload_changes_summary").format(
+                added=changes.get("added_count", 0),
+                removed=changes.get("removed_count", 0),
+            )
+        )
+        summary_label.setWordWrap(True)
+        layout.addWidget(summary_label)
+
+        lists_layout = QHBoxLayout()
+
+        missing_layout = QVBoxLayout()
+        missing_layout.addWidget(QLabel(tr("label_missing_mods")))
+        self.missing_list = QListWidget()
+        for mod in changes.get("removed_mods") or []:
+            workshop_id = mod.get("workshop_id")
+            title = mod.get("title") or tr("unknown_mod")
+            self.missing_list.addItem(tr("label_queue_item").format(title=title, workshop_id=workshop_id))
+        missing_layout.addWidget(self.missing_list)
+        lists_layout.addLayout(missing_layout)
+
+        added_layout = QVBoxLayout()
+        added_layout.addWidget(QLabel(tr("label_added_mods")))
+        self.added_list = QListWidget()
+        for mod in changes.get("added_mods") or []:
+            workshop_id = mod.get("workshop_id")
+            title = mod.get("title") or tr("unknown_mod")
+            self.added_list.addItem(tr("label_queue_item").format(title=title, workshop_id=workshop_id))
+        added_layout.addWidget(self.added_list)
+        lists_layout.addLayout(added_layout)
+
+        layout.addLayout(lists_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+
 class WorkshopQueueBridge(QObject):
     queue_toggled = Signal(str)
 
@@ -105,23 +201,11 @@ class ModListItem(QListWidgetItem):
         if sort_by == 'alphabetical':
             return (self.mod_data.get('title') or '').lower()
         elif sort_by == 'last_workshop_update':
-            return self.mod_data.get('remote_updated_at', 0)
+            return self.mod_data.get('remote_updated_at') or 0
         elif sort_by == 'last_download_time':
-            return self.mod_data.get('last_downloaded_at', 0)
+            return self.mod_data.get('last_downloaded_at') or 0
         elif sort_by == 'file_size':
-            # Calculate file size if content_path exists
-            content_path = self.mod_data.get('content_path')
-            if content_path and os.path.exists(content_path):
-                try:
-                    total_size = 0
-                    for dirpath, dirnames, filenames in os.walk(content_path):
-                        for filename in filenames:
-                            filepath = os.path.join(dirpath, filename)
-                            total_size += os.path.getsize(filepath)
-                    return total_size
-                except:
-                    pass
-            return 0
+            return self.mod_data.get('file_size') or 0
         return 0
 
 class DownloadFromUrlIdDialog(QDialog):
@@ -1078,7 +1162,7 @@ class WorkshopBrowserDialog(QDialog):
         if not self.queue:
             QMessageBox.information(self, tr("info_no_mods_title"), tr("info_browser_queue_empty"))
             return
-        started = self.parent_window.start_download_for_ids(self.queue.copy())
+        started = self.parent_window.start_download_for_ids(self.queue.copy(), finished_callback=self.accept)
         if not started:
             return
         self.queue = []
@@ -1263,6 +1347,8 @@ class SettingsDialog(QDialog):
             "library_root": "",
             "language": "en",
             "refresh_mod_db_on_startup": False,
+            "check_mod_updates_on_startup": False,
+            "check_app_updates_on_startup": False,
         }
         
         layout = QVBoxLayout()
@@ -1290,11 +1376,40 @@ class SettingsDialog(QDialog):
         startup_section_spacer.setFixedHeight(12)
         form_layout.addRow("", startup_section_spacer)
 
+        startup_options_widget = QWidget()
+        startup_options_layout = QVBoxLayout(startup_options_widget)
+        startup_options_layout.setContentsMargins(0, 0, 0, 0)
+        startup_options_layout.setSpacing(2)
+
         self.refresh_mod_db_checkbox = QCheckBox(tr("label_refresh_mod_db_on_startup"))
-        form_layout.addRow(tr("label_startup"), self.refresh_mod_db_checkbox)
+        startup_options_layout.addWidget(self.refresh_mod_db_checkbox)
         self.refresh_mod_db_warning_label = QLabel(tr("label_refresh_mod_db_on_startup_warning"))
         self.refresh_mod_db_warning_label.setWordWrap(True)
-        form_layout.addRow("", self.refresh_mod_db_warning_label)
+        self.refresh_mod_db_warning_label.setStyleSheet("color: red;")
+        startup_options_layout.addWidget(self.refresh_mod_db_warning_label)
+
+        startup_options_layout.addSpacing(6)
+
+        self.check_mod_updates_on_startup_checkbox = QCheckBox(tr("label_check_mod_updates_on_startup"))
+        startup_options_layout.addWidget(self.check_mod_updates_on_startup_checkbox)
+        self.check_mod_updates_on_startup_warning_label = QLabel(tr("label_check_mod_updates_on_startup_warning"))
+        self.check_mod_updates_on_startup_warning_label.setWordWrap(True)
+        self.check_mod_updates_on_startup_warning_label.setStyleSheet("color: red;")
+        startup_options_layout.addWidget(self.check_mod_updates_on_startup_warning_label)
+
+        startup_options_layout.addSpacing(6)
+
+        self.check_app_updates_on_startup_checkbox = QCheckBox(tr("label_check_app_updates_on_startup"))
+        startup_options_layout.addWidget(self.check_app_updates_on_startup_checkbox)
+        app_update_warning_text = tr("label_check_app_updates_on_startup_warning")
+        self.check_app_updates_on_startup_warning_label = QLabel(app_update_warning_text)
+        self.check_app_updates_on_startup_warning_label.setWordWrap(True)
+        self.check_app_updates_on_startup_warning_label.setVisible(
+            bool(app_update_warning_text) and app_update_warning_text != "label_check_app_updates_on_startup_warning"
+        )
+        startup_options_layout.addWidget(self.check_app_updates_on_startup_warning_label)
+
+        form_layout.addRow(tr("label_startup"), startup_options_widget)
         
         layout.addLayout(form_layout)
         
@@ -1309,6 +1424,12 @@ class SettingsDialog(QDialog):
         refresh_mod_db_on_startup = settings.get_refresh_mod_db_on_startup()
         self.original_settings["refresh_mod_db_on_startup"] = refresh_mod_db_on_startup
         self.refresh_mod_db_checkbox.setChecked(refresh_mod_db_on_startup)
+        check_mod_updates_on_startup = settings.get_check_mod_updates_on_startup()
+        self.original_settings["check_mod_updates_on_startup"] = check_mod_updates_on_startup
+        self.check_mod_updates_on_startup_checkbox.setChecked(check_mod_updates_on_startup)
+        check_app_updates_on_startup = settings.get_check_app_updates_on_startup()
+        self.original_settings["check_app_updates_on_startup"] = check_app_updates_on_startup
+        self.check_app_updates_on_startup_checkbox.setChecked(check_app_updates_on_startup)
         
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel,
@@ -1342,6 +1463,8 @@ class SettingsDialog(QDialog):
             "library_root": self.normalize_root_text(self.library_root_edit.text()),
             "language": self.language_combo.currentData(),
             "refresh_mod_db_on_startup": self.refresh_mod_db_checkbox.isChecked(),
+            "check_mod_updates_on_startup": self.check_mod_updates_on_startup_checkbox.isChecked(),
+            "check_app_updates_on_startup": self.check_app_updates_on_startup_checkbox.isChecked(),
         }
 
     def has_library_root_changed(self):
@@ -1401,11 +1524,19 @@ class SettingsDialog(QDialog):
             new_root = current_settings["library_root"]
             new_language = current_settings["language"]
             new_refresh_mod_db_on_startup = current_settings["refresh_mod_db_on_startup"]
+            new_check_mod_updates_on_startup = current_settings["check_mod_updates_on_startup"]
+            new_check_app_updates_on_startup = current_settings["check_app_updates_on_startup"]
             changed = self.has_settings_changed()
             library_root_changed = new_root != self.original_settings["library_root"]
             language_changed = new_language != self.original_settings["language"]
             refresh_mod_db_on_startup_changed = (
                 new_refresh_mod_db_on_startup != self.original_settings["refresh_mod_db_on_startup"]
+            )
+            check_mod_updates_on_startup_changed = (
+                new_check_mod_updates_on_startup != self.original_settings["check_mod_updates_on_startup"]
+            )
+            check_app_updates_on_startup_changed = (
+                new_check_app_updates_on_startup != self.original_settings["check_app_updates_on_startup"]
             )
 
             if not new_root and self.original_settings["library_root"]:
@@ -1441,8 +1572,11 @@ class SettingsDialog(QDialog):
                 worker.log.connect(progress_dialog.append_log)
 
                 def on_finished(result):
-                    progress_dialog.append_log(
-                        tr("log_loading_library_complete").format(count=result.get("imported_count", 0))
+                    if hasattr(parent_window, "append_library_reload_change_log"):
+                        parent_window.append_library_reload_change_log(progress_dialog, result)
+                    else:
+                        progress_dialog.append_log(
+                            tr("log_loading_library_complete").format(count=result.get("imported_count", 0))
                     )
                     progress_dialog.mark_done()
                     self.apply_non_root_settings_changes(
@@ -1450,15 +1584,16 @@ class SettingsDialog(QDialog):
                         language_changed,
                         new_refresh_mod_db_on_startup,
                         refresh_mod_db_on_startup_changed,
+                        new_check_mod_updates_on_startup,
+                        check_mod_updates_on_startup_changed,
+                        new_check_app_updates_on_startup,
+                        check_app_updates_on_startup_changed,
                     )
                     self.root_changed = True
                     self.original_settings = current_settings
-                    QMessageBox.information(
-                        self,
-                        tr("info_settings_saved_title"),
-                        tr("info_settings_saved_message").format(count=result.get("imported_count", 0))
-                    )
                     progress_dialog.close()
+                    if hasattr(parent_window, "show_library_reload_changes_dialog"):
+                        parent_window.show_library_reload_changes_dialog(result)
                     self.accept()
 
                 def on_error(error_message):
@@ -1480,24 +1615,37 @@ class SettingsDialog(QDialog):
                 language_changed,
                 new_refresh_mod_db_on_startup,
                 refresh_mod_db_on_startup_changed,
+                new_check_mod_updates_on_startup,
+                check_mod_updates_on_startup_changed,
+                new_check_app_updates_on_startup,
+                check_app_updates_on_startup_changed,
             )
             self.root_changed = library_root_changed
             self.original_settings = current_settings
-            QMessageBox.information(
-                self,
-                tr("info_settings_saved_title"),
-                tr("info_settings_saved_simple")
-            )
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, tr("error_title"), tr("error_save_settings_message").format(error=e))
 
-    def apply_non_root_settings_changes(self, new_language, language_changed, new_refresh_mod_db_on_startup, refresh_mod_db_on_startup_changed):
+    def apply_non_root_settings_changes(
+        self,
+        new_language,
+        language_changed,
+        new_refresh_mod_db_on_startup,
+        refresh_mod_db_on_startup_changed,
+        new_check_mod_updates_on_startup,
+        check_mod_updates_on_startup_changed,
+        new_check_app_updates_on_startup,
+        check_app_updates_on_startup_changed,
+    ):
         settings_manager = SettingsManager(get_settings_path())
         if language_changed:
             settings_manager.set_language(new_language)
         if refresh_mod_db_on_startup_changed:
             settings_manager.set_refresh_mod_db_on_startup(new_refresh_mod_db_on_startup)
+        if check_mod_updates_on_startup_changed:
+            settings_manager.set_check_mod_updates_on_startup(new_check_mod_updates_on_startup)
+        if check_app_updates_on_startup_changed:
+            settings_manager.set_check_app_updates_on_startup(new_check_app_updates_on_startup)
 
 class UpdateCheckThread(QThread):
     """Thread for checking mod updates."""
@@ -1520,7 +1668,11 @@ class UpdateCheckThread(QThread):
                 workshop_id = mod['workshop_id']
                 status = mod.get('status')
                 self.progress.emit(index, total, f"Checking {workshop_id}")
-                check_result = check_mod_for_updates(workshop_id, mod.get('remote_updated_at'))
+                check_result = check_mod_for_updates(
+                    workshop_id,
+                    mod.get('remote_updated_at'),
+                    mod.get('last_downloaded_at'),
+                )
                 results.append(check_result)
             self.finished.emit(results)
         except Exception as e:
@@ -2095,10 +2247,11 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self.refresh_mod_list()
         QTimer.singleShot(0, self.refresh_mod_db_on_startup_if_enabled)
+        QTimer.singleShot(0, self.run_startup_checks_if_enabled)
     
     def init_ui(self):
         """Initialize the user interface."""
-        self.setWindowTitle(tr("app_title"))
+        self.setWindowTitle(f"{tr('app_title')} v{__version__}")
         self.setGeometry(100, 100, 1400, 800)
         
         # Create central widget
@@ -2143,13 +2296,15 @@ class MainWindow(QMainWindow):
         self.sort_combo.addItem(tr("sort_last_workshop_update"), "last_workshop_update")
         self.sort_combo.addItem(tr("sort_last_download_time"), "last_download_time")
         self.sort_combo.addItem(tr("sort_file_size"), "file_size")
-        self.sort_combo.currentTextChanged.connect(self.sort_mods)
+        self.sort_combo.currentIndexChanged.connect(lambda _index: self.sort_mods())
         controls_layout.addWidget(self.sort_combo)
         
         list_layout.addLayout(controls_layout)
         
         # Mod list
         self.mod_list = QListWidget()
+        self.mod_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.mod_list.customContextMenuRequested.connect(self.show_mod_list_context_menu)
         self.mod_list.itemClicked.connect(self.on_mod_selected)
         list_layout.addWidget(self.mod_list)
         
@@ -2253,7 +2408,7 @@ class MainWindow(QMainWindow):
             msg_box.finished.connect(lambda: progress_dialog.close())
             msg_box.exec()
 
-    def start_download_for_ids(self, workshop_ids):
+    def start_download_for_ids(self, workshop_ids, finished_callback=None):
         download_root = self.require_valid_library_root()
         if not download_root:
             return False
@@ -2278,12 +2433,13 @@ class MainWindow(QMainWindow):
                 progress_dialog.mark_done()
                 self.refresh_mod_list()
 
-                summary = f"Download complete: {success} success, {failed} failed."
                 msg_box = QMessageBox(self)
                 msg_box.setWindowTitle(tr("question_download_summary_title"))
                 msg_box.setText(tr("question_download_summary_message").format(success=success, failed=failed))
                 msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
                 msg_box.finished.connect(lambda: progress_dialog.close())
+                if finished_callback:
+                    msg_box.finished.connect(lambda _result: finished_callback())
                 msg_box.exec()
 
                 return
@@ -2316,46 +2472,62 @@ class MainWindow(QMainWindow):
 
     def show_check_updates(self):
         """Show check updates flow"""
+        self.run_mod_update_check(silent=False)
+
+    def run_mod_update_check(self, silent=False):
         db = ModDatabase(self.db_path)
         mods = db.list_all_mods()
 
         if not mods:
-            QMessageBox.information(self, tr("info_no_mods_title"), tr("info_no_mods_found"))
+            if not silent:
+                QMessageBox.information(self, tr("info_no_mods_title"), tr("info_no_mods_found"))
             return
 
-        answer = QMessageBox.question(
-            self,
-            tr("question_check_updates_title"),
-            tr("question_check_updates_message"),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        progress_dialog = None
+        if not silent:
+            answer = QMessageBox.question(
+                self,
+                tr("question_check_updates_title"),
+                tr("question_check_updates_message"),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
 
-        if answer != QMessageBox.Yes:
-            return
+            if answer != QMessageBox.Yes:
+                return
 
-        progress_dialog = OperationProgressDialog(tr("dialog_checking_updates"), self)
-        progress_dialog.set_overall(0, len(mods))
-        progress_dialog.set_current("Starting update check...")
-        progress_dialog.show()
+            progress_dialog = OperationProgressDialog(tr("dialog_checking_updates"), self)
+            progress_dialog.set_overall(0, len(mods))
+            progress_dialog.set_current("Starting update check...")
+            progress_dialog.show()
 
         worker = UpdateCheckThread(mods)
-        worker.progress.connect(lambda done, total, current: [progress_dialog.set_overall(done, total), progress_dialog.set_current(current)])
-        worker.error.connect(lambda err: QMessageBox.critical(self, tr("error_update_check_title"), err))
+        if progress_dialog:
+            worker.progress.connect(lambda done, total, current: [progress_dialog.set_overall(done, total), progress_dialog.set_current(current)])
+
+        def on_error(err):
+            if silent:
+                logging.error("Automatic mod update check failed: %s", err)
+                return
+            QMessageBox.critical(self, tr("error_update_check_title"), err)
+
+        worker.error.connect(on_error)
 
         def on_check_finished(results):
             outdated = [r for r in results if r.get('status') == 'update_available']
-            progress_dialog.append_log(f"Update check complete: {len(outdated)} updates found")
-            progress_dialog.mark_done()
+            if progress_dialog:
+                progress_dialog.append_log(f"Update check complete: {len(outdated)} updates found")
+                progress_dialog.mark_done()
 
             if not outdated:
-                msg_box = QMessageBox(self)
-                msg_box.setWindowTitle(tr("info_all_up_to_date_title"))
-                msg_box.setText(tr("info_all_up_to_date_message"))
-                msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-                msg_box.finished.connect(lambda: progress_dialog.close())
-                msg_box.exec()
-                self.refresh_mod_list()
+                if progress_dialog:
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle(tr("info_all_up_to_date_title"))
+                    msg_box.setText(tr("info_all_up_to_date_message"))
+                    msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+                    msg_box.finished.connect(lambda: progress_dialog.close())
+                    msg_box.exec()
+                    self.refresh_mod_list()
                 return
 
             dialog = OutdatedModsDialog(outdated, self)
@@ -2441,64 +2613,52 @@ class MainWindow(QMainWindow):
             return True
         return False
 
-    @staticmethod
-    def summarize_release_notes(notes, max_length=600):
-        notes = (notes or "").strip()
-        if not notes:
-            return ""
-        if len(notes) <= max_length:
-            return notes
-        return notes[:max_length].rstrip() + "..."
-
     def show_app_update_check(self):
-        progress_dialog = OperationProgressDialog(tr("dialog_checking_updates"), self)
-        progress_dialog.set_overall(0, 0)
-        progress_dialog.set_current(tr("dialog_checking_updates"))
-        progress_dialog.show()
+        self.run_app_update_check(silent=False)
+
+    def run_app_update_check(self, silent=False):
+        progress_dialog = None
+        if not silent:
+            progress_dialog = OperationProgressDialog(tr("dialog_checking_updates"), self)
+            progress_dialog.set_overall(0, 0)
+            progress_dialog.set_current(tr("dialog_checking_updates"))
+            progress_dialog.show()
 
         worker = AppUpdateCheckThread()
 
         def on_finished(result):
-            progress_dialog.mark_done()
-            progress_dialog.close()
+            if progress_dialog:
+                progress_dialog.mark_done()
+                progress_dialog.close()
             release = result["release"]
             if not result["update_available"]:
-                QMessageBox.information(
-                    self,
-                    tr("dialog_app_up_to_date"),
-                    tr("info_app_is_up_to_date_message"),
-                )
+                if not silent:
+                    QMessageBox.information(
+                        self,
+                        tr("dialog_app_up_to_date"),
+                        tr("info_app_is_up_to_date_message"),
+                    )
                 return
 
-            message_box = QMessageBox(self)
-            message_box.setIcon(QMessageBox.Information)
-            message_box.setWindowTitle(tr("dialog_app_update_available"))
-            message_box.setText(
-                tr("info_app_update_available_message").format(
-                    current_version=result["current_version"],
-                    latest_version=result["latest_version"],
-                )
+            dialog = AppUpdateAvailableDialog(
+                result["current_version"],
+                result["latest_version"],
+                release.notes,
+                self,
             )
-            informative_text = tr("info_update_will_restart_message")
-            notes_summary = self.summarize_release_notes(release.notes)
-            if notes_summary:
-                informative_text += f"\n\n{tr('info_app_update_notes_label')}\n{notes_summary}"
-                message_box.setDetailedText(release.notes)
-            message_box.setInformativeText(informative_text)
-            update_now_button = message_box.addButton(tr("button_update_now"), QMessageBox.AcceptRole)
-            message_box.addButton(tr("button_later"), QMessageBox.RejectRole)
-            message_box.exec()
-
-            if message_box.clickedButton() == update_now_button:
+            if dialog.exec() == QDialog.Accepted:
                 self.start_app_update_download(release)
 
         def on_error(error_message):
-            progress_dialog.close()
-            QMessageBox.warning(
-                self,
-                tr("dialog_app_update_error"),
-                tr("error_update_check_failed_message").format(error=error_message),
-            )
+            if progress_dialog:
+                progress_dialog.close()
+                QMessageBox.warning(
+                    self,
+                    tr("dialog_app_update_error"),
+                    tr("error_update_check_failed_message").format(error=error_message),
+                )
+            else:
+                logging.error("Automatic app update check failed: %s", error_message)
 
         worker.finished.connect(on_finished)
         worker.error.connect(on_error)
@@ -2571,42 +2731,25 @@ class MainWindow(QMainWindow):
         self.mod_list.clear()
         self.all_mods = []
         self.detail_panel.clear_details()
-
-        progress_dialog = OperationProgressDialog(tr("dialog_loading_library"), self)
-        progress_dialog.set_overall(0, 0)
-        progress_dialog.set_current(tr("status_scanning_library_root"))
-        progress_dialog.show()
-
-        worker = StartupLibraryRefreshThread(self.db_path, library_root)
-        worker.progress.connect(
-            lambda done, total, current: [
-                progress_dialog.set_overall(done, total),
-                progress_dialog.set_current(current),
-            ]
+        self.start_library_reload(
+            library_root,
+            title=tr("dialog_loading_library"),
+            finished_callback=lambda _result: self.run_startup_checks_if_enabled(),
+            error_callback=lambda _error: self.run_startup_checks_if_enabled(),
         )
-        worker.log.connect(progress_dialog.append_log)
 
-        def on_finished(result):
-            progress_dialog.append_log(
-                tr("log_loading_library_complete").format(count=result.get("imported_count", 0))
-            )
-            progress_dialog.mark_done()
-            self.refresh_mod_list()
-            progress_dialog.close()
+    def run_startup_checks_if_enabled(self):
+        settings = SettingsManager(self.settings_path)
+        if settings.get_refresh_mod_db_on_startup():
+            # If a refresh worker is currently running, let its completion callback trigger checks.
+            active_refresh = any(isinstance(worker, StartupLibraryRefreshThread) and worker.isRunning() for worker in self.worker_threads)
+            if active_refresh:
+                return
 
-        def on_error(error_message):
-            logging.error("Startup mod database refresh failed: %s", error_message)
-            progress_dialog.close()
-            QMessageBox.warning(
-                self,
-                tr("error_title"),
-                tr("error_startup_refresh_mod_db_message").format(error=error_message),
-            )
-
-        worker.finished.connect(on_finished)
-        worker.error.connect(on_error)
-        self.worker_threads.append(worker)
-        worker.start()
+        if settings.get_check_mod_updates_on_startup():
+            QTimer.singleShot(0, lambda: self.run_mod_update_check(silent=False))
+        if settings.get_check_app_updates_on_startup():
+            QTimer.singleShot(0, lambda: self.run_app_update_check(silent=True))
     
     def refresh_mod_list(self):
         """Refresh the mod list from database."""
@@ -2632,6 +2775,18 @@ class MainWindow(QMainWindow):
             self.sort_combo.setCurrentIndex(index)
         self.filter_mods()
         self.sort_mods()
+
+    @staticmethod
+    def get_sort_value(mod, sort_by):
+        if sort_by == 'alphabetical':
+            return (mod.get('title') or '').lower()
+        if sort_by == 'last_workshop_update':
+            return mod.get('remote_updated_at') or 0
+        if sort_by == 'last_download_time':
+            return mod.get('last_downloaded_at') or 0
+        if sort_by == 'file_size':
+            return mod.get('file_size') or 0
+        return 0
     
     def filter_mods(self):
         """Filter mods based on search text."""
@@ -2655,26 +2810,13 @@ class MainWindow(QMainWindow):
         
         # Sort the mod data
         if sort_by == 'alphabetical':
-            self.all_mods.sort(key=lambda m: (m.get('title') or '').lower())
+            self.all_mods.sort(key=lambda m: self.get_sort_value(m, sort_by))
         elif sort_by == 'last_workshop_update':
-            self.all_mods.sort(key=lambda m: m.get('remote_updated_at', 0), reverse=True)
+            self.all_mods.sort(key=lambda m: self.get_sort_value(m, sort_by), reverse=True)
         elif sort_by == 'last_download_time':
-            self.all_mods.sort(key=lambda m: m.get('last_downloaded_at', 0), reverse=True)
+            self.all_mods.sort(key=lambda m: self.get_sort_value(m, sort_by), reverse=True)
         elif sort_by == 'file_size':
-            def get_file_size(mod):
-                content_path = mod.get('content_path')
-                if content_path and os.path.exists(content_path):
-                    try:
-                        total_size = 0
-                        for dirpath, dirnames, filenames in os.walk(content_path):
-                            for filename in filenames:
-                                filepath = os.path.join(dirpath, filename)
-                                total_size += os.path.getsize(filepath)
-                        return total_size
-                    except:
-                        pass
-                return 0
-            self.all_mods.sort(key=get_file_size, reverse=True)
+            self.all_mods.sort(key=lambda m: self.get_sort_value(m, sort_by), reverse=True)
         
         # Rebuild the list widget
         self.mod_list.clear()
@@ -2684,7 +2826,233 @@ class MainWindow(QMainWindow):
         
         # Reapply filter
         self.filter_mods()
-    
+
+    def get_mod_item_at_position(self, position):
+        item = self.mod_list.itemAt(position)
+        if item:
+            self.mod_list.setCurrentItem(item)
+            if not item.isSelected():
+                self.mod_list.clearSelection()
+                item.setSelected(True)
+        return item
+
+    def show_mod_list_context_menu(self, position):
+        item = self.get_mod_item_at_position(position)
+        if not item:
+            return
+
+        mod_data = item.mod_data
+        menu = QMenu(self)
+
+        refresh_action = menu.addAction(tr("button_refresh_list"))
+        reload_library_action = menu.addAction(tr("button_reload_library"))
+        menu.addSeparator()
+        open_folder_action = menu.addAction(tr("button_open_mod_folder"))
+        open_workshop_action = menu.addAction(tr("button_open_workshop_page"))
+        menu.addSeparator()
+        delete_action = menu.addAction(tr("button_delete_mod"))
+        redownload_action = menu.addAction(tr("button_delete_mod_redownload"))
+
+        chosen_action = menu.exec(self.mod_list.mapToGlobal(position))
+        if chosen_action == refresh_action:
+            self.refresh_mod_list()
+        elif chosen_action == reload_library_action:
+            self.reload_library_from_disk()
+        elif chosen_action == open_folder_action:
+            self.open_mod_folder_for_mod(mod_data)
+        elif chosen_action == open_workshop_action:
+            self.open_workshop_page_for_mod(mod_data)
+        elif chosen_action == delete_action:
+            self.delete_mod_from_disk_and_db(mod_data)
+        elif chosen_action == redownload_action:
+            self.delete_mod_and_redownload(mod_data)
+
+    def open_mod_folder_for_mod(self, mod_data):
+        content_path = (mod_data or {}).get("content_path")
+        if content_path and os.path.exists(content_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(content_path))
+            return
+        QMessageBox.warning(self, tr("error_title"), tr("warning_mod_folder_not_found"))
+
+    def open_workshop_page_for_mod(self, mod_data):
+        workshop_id = (mod_data or {}).get("workshop_id")
+        if not workshop_id:
+            QMessageBox.warning(self, tr("error_title"), tr("warning_workshop_link_not_found"))
+            return
+        url = QUrl(f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}")
+        QDesktopServices.openUrl(url)
+
+    def remove_mod_files(self, content_path):
+        if not content_path:
+            return
+
+        target = Path(content_path)
+        if not target.exists():
+            return
+
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+
+    def delete_mod_from_disk_and_db(self, mod_data, skip_confirmation=False):
+        workshop_id = (mod_data or {}).get("workshop_id")
+        if not workshop_id:
+            return False
+
+        title = mod_data.get("title") or tr("unknown_mod")
+        if not skip_confirmation:
+            answer = QMessageBox.question(
+                self,
+                tr("dialog_delete_mod"),
+                tr("question_delete_mod_message").format(title=title, workshop_id=workshop_id),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return False
+
+        try:
+            self.remove_mod_files(mod_data.get("content_path"))
+            db = ModDatabase(self.db_path)
+            db.delete_mod(workshop_id)
+            self.refresh_mod_list()
+            self.detail_panel.clear_details()
+            return True
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                tr("error_title"),
+                tr("error_delete_mod_message").format(error=exc),
+            )
+            return False
+
+    def delete_mod_and_redownload(self, mod_data):
+        workshop_id = (mod_data or {}).get("workshop_id")
+        if not workshop_id:
+            return
+
+        download_root = self.require_valid_library_root()
+        if not download_root:
+            return
+
+        title = mod_data.get("title") or tr("unknown_mod")
+        answer = QMessageBox.question(
+            self,
+            tr("dialog_delete_mod_redownload"),
+            tr("question_delete_mod_redownload_message").format(title=title, workshop_id=workshop_id),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        if not self.delete_mod_from_disk_and_db(mod_data, skip_confirmation=True):
+            return
+
+        self.start_download_for_ids([workshop_id])
+
+    def append_library_reload_change_log(self, progress_dialog, result):
+        progress_dialog.append_log(
+            tr("log_loading_library_complete").format(count=result.get("imported_count", 0))
+        )
+        changes = result.get("changes") or {}
+        progress_dialog.append_log(
+            tr("log_loading_library_changes").format(
+                added=changes.get("added_count", 0),
+                removed=changes.get("removed_count", 0),
+            )
+        )
+        added_mods = changes.get("added_mods") or []
+        removed_mods = changes.get("removed_mods") or []
+        if added_mods:
+            added_labels = [
+                tr("label_queue_item").format(
+                    title=mod.get("title") or tr("unknown_mod"),
+                    workshop_id=mod.get("workshop_id"),
+                )
+                for mod in added_mods
+            ]
+            progress_dialog.append_log(tr("log_loading_library_added").format(ids=", ".join(added_labels)))
+        if removed_mods:
+            removed_labels = [
+                tr("label_queue_item").format(
+                    title=mod.get("title") or tr("unknown_mod"),
+                    workshop_id=mod.get("workshop_id"),
+                )
+                for mod in removed_mods
+            ]
+            progress_dialog.append_log(tr("log_loading_library_removed").format(ids=", ".join(removed_labels)))
+
+    def show_library_reload_changes_dialog(self, result):
+        changes = result.get("changes") or {}
+        if not changes:
+            return
+        dialog = LibraryReloadChangesDialog(changes, self)
+        dialog.exec()
+
+    def start_library_reload(self, library_root, title=None, finished_callback=None, error_callback=None):
+        self.mod_list.clear()
+        self.all_mods = []
+        self.detail_panel.clear_details()
+
+        progress_dialog = OperationProgressDialog(title or tr("dialog_loading_library"), self)
+        progress_dialog.set_overall(0, 0)
+        progress_dialog.set_current(tr("status_scanning_library_root"))
+        progress_dialog.show()
+
+        worker = StartupLibraryRefreshThread(self.db_path, library_root)
+        worker.progress.connect(
+            lambda done, total, current: [
+                progress_dialog.set_overall(done, total),
+                progress_dialog.set_current(current),
+            ]
+        )
+        worker.log.connect(progress_dialog.append_log)
+
+        def on_finished(result):
+            self.append_library_reload_change_log(progress_dialog, result)
+            progress_dialog.mark_done()
+            self.refresh_mod_list()
+            progress_dialog.close()
+            self.show_library_reload_changes_dialog(result)
+            if finished_callback:
+                finished_callback(result)
+
+        def on_error(error_message):
+            logging.error("Library reload failed: %s", error_message)
+            progress_dialog.close()
+            QMessageBox.warning(
+                self,
+                tr("error_title"),
+                tr("error_startup_refresh_mod_db_message").format(error=error_message),
+            )
+            if error_callback:
+                error_callback(error_message)
+
+        worker.finished.connect(on_finished)
+        worker.error.connect(on_error)
+        self.worker_threads.append(worker)
+        worker.start()
+
+    def reload_library_from_disk(self):
+        settings = SettingsManager(self.settings_path)
+        library_root = self.require_valid_library_root()
+        if not library_root:
+            return
+
+        answer = QMessageBox.question(
+            self,
+            tr("dialog_loading_library"),
+            tr("question_reload_library_message"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self.start_library_reload(library_root)
+
     def on_mod_selected(self, item):
         """Handle mod selection."""
         if item:
@@ -2696,9 +3064,10 @@ def main():
     app = QApplication(sys.argv)
     
     # Set application properties
-    app.setApplicationName(tr("app_title"))
+    app.setApplicationName("StellarisModManager")
+    app.setApplicationDisplayName("")
     app.setApplicationVersion(__version__)
-    app.setOrganizationName(tr("app_title"))
+    app.setOrganizationName("project10581")
     
     window = MainWindow()
     window.show()
