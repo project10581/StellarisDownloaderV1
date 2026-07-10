@@ -141,8 +141,6 @@ The GUI displays the following metadata (fetched from Steam API):
 
 ## Current Limitations
 
-- Preview images are not downloaded/displayed (shows placeholder)
-- No embedded Steam Workshop browser
 - No collection support
 - No launcher integration
 - No GUI for initial setup
@@ -163,5 +161,4 @@ StellarisDownloaderV1/
 │   ├── app.db            # SQLite database
 │   └── settings.json     # Application settings
 └── steamcmd/             # Bundled SteamCMD
-```</content>
-<parameter name="filePath">c:\StellarisDownloaderV1\GUI_README.md
+```

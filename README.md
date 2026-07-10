@@ -10,7 +10,7 @@
 
 如果是，那么这款Mod下载/更新器（群星专用）专为你而打造！
 
-Claude, Grok, GPT师傅倾情制作！（所以报告bug请用AI能听懂的语言,并且不保证会修）（下载器本体的自动更新功能懒得写了，再等等吧）
+Claude, Grok, GPT师傅倾情制作！（所以报告bug请用AI能听懂的语言，并且不保证会修）
 
 仅包含下载/更新功能，需要mod加载器的请访问Irony Mod Manager
 
@@ -20,7 +20,7 @@ Claude, Grok, GPT师傅倾情制作！（所以报告bug请用AI能听懂的语�
 
 --> 下载StellarisModManager并在任意处解压
 
---> 点击tellarisModManager.exe运行
+--> 点击StellarisModManager.exe运行
 
 --> 点击左上角Settings更改语言（如果能看懂还是别改了吧， GPT师傅翻译的，非常抽象）
 

@@ -41,6 +41,13 @@ def wait_for_process_exit(pid: int, timeout_seconds: int = 120) -> None:
 
 def extract_zip_package(zip_path: Path, extract_root: Path) -> Path:
     with zipfile.ZipFile(zip_path, "r") as archive:
+        resolved_root = extract_root.resolve()
+        for member in archive.infolist():
+            target_path = (extract_root / member.filename).resolve()
+            try:
+                target_path.relative_to(resolved_root)
+            except ValueError as exc:
+                raise RuntimeError(f"Unsafe path in update package: {member.filename}") from exc
         archive.extractall(extract_root)
 
     return extract_root
@@ -104,12 +111,27 @@ def schedule_staging_cleanup(staging_root: Path) -> None:
     try:
         if not staging_root.exists():
             return
+        cleanup_script = staging_root.parent / f"cleanup-{staging_root.name}.cmd"
+        cleanup_script.write_text(
+            "\n".join(
+                [
+                    "@echo off",
+                    f'set "TARGET={staging_root}"',
+                    "for /L %%I in (1,1,30) do (",
+                    '  rmdir /s /q "%TARGET%" >nul 2>nul',
+                    '  if not exist "%TARGET%" goto done',
+                    "  ping 127.0.0.1 -n 2 >nul",
+                    ")",
+                    ":done",
+                    'del "%~f0" >nul 2>nul',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
         subprocess.Popen(
-            [
-                "cmd",
-                "/c",
-                f'ping 127.0.0.1 -n 4 > nul & rmdir /s /q "{staging_root}"',
-            ],
+            ["cmd", "/c", str(cleanup_script)],
+            cwd=str(cleanup_script.parent),
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         logging.info("Scheduled staging cleanup for %s", staging_root)

@@ -1,4 +1,4 @@
-__version__ = "1.4.0"
+__version__ = "1.6.1"
 
 GITHUB_OWNER = "project10581"
 GITHUB_REPO = "StellarisDownloaderV1"

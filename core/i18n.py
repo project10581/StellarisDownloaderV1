@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from core.runtime_paths import get_settings_path as runtime_settings_path
 from core.settings import SettingsManager
 
@@ -36,6 +34,7 @@ TRANSLATIONS = {
         "dialog_language_changed": "Language Changed",
         "unknown_mod": "Unknown Mod",
         "select_mod_to_view_details": "Select a mod to view details",
+        "loading_preview": "Loading preview...",
         "no_preview_available": "No preview available",
         "preview_unavailable": "Preview unavailable",
         "label_workshop_url": "Workshop URL:",
@@ -143,6 +142,8 @@ TRANSLATIONS = {
         "warning_library_root_required_message": "Library root is not configured or does not exist.",
         "warning_mod_folder_not_found": "The mod folder could not be found.",
         "warning_workshop_link_not_found": "The Workshop link for this mod could not be found.",
+        "warning_operations_running_title": "Operation in Progress",
+        "warning_operations_running_message": "Wait for the current background operation to finish before closing the application.",
         "info_no_selection_title": "No Selection",
         "info_no_outdated_mods_selected": "No outdated mods selected for update.",
         "info_no_selection_update_mods": "Please select at least one mod to update.",
@@ -219,6 +220,7 @@ TRANSLATIONS = {
         "dialog_language_changed": "语言已更改",
         "unknown_mod": "未知 Mod",
         "select_mod_to_view_details": "选择一个 Mod 查看详情",
+        "loading_preview": "正在加载预览...",
         "no_preview_available": "无预览可用",
         "preview_unavailable": "预览不可用",
         "label_workshop_url": "创意工坊链接:",
@@ -326,6 +328,8 @@ TRANSLATIONS = {
         "warning_library_root_required_message": "库目录未配置或不存在。",
         "warning_mod_folder_not_found": "找不到该 Mod 的文件夹。",
         "warning_workshop_link_not_found": "找不到该 Mod 的创意工坊链接。",
+        "warning_operations_running_title": "操作正在进行",
+        "warning_operations_running_message": "请等待当前后台操作完成后再关闭应用。",
         "info_no_selection_title": "未选择",
         "info_no_outdated_mods_selected": "没有选择要更新的过期 Mod。",
         "info_no_selection_update_mods": "请至少选择一个要更新的 Mod。",
@@ -373,13 +377,18 @@ TRANSLATIONS = {
     },
 }
 
+_cached_language = None
+
 
 def get_settings_path() -> str:
     return runtime_settings_path()
 
 
 def get_language() -> str:
-    return SettingsManager(get_settings_path()).get_language()
+    global _cached_language
+    if _cached_language is None:
+        _cached_language = SettingsManager(get_settings_path()).get_language()
+    return _cached_language
 
 
 def tr(key: str) -> str:

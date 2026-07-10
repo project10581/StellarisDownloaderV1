@@ -149,11 +149,18 @@ def check_for_updates() -> dict:
     }
 
 
+def get_safe_asset_filename(asset_name: str) -> str:
+    candidate = Path(asset_name or "")
+    if not asset_name or candidate.name != asset_name or candidate.suffix.lower() != ".zip":
+        raise UpdateError(f"Unsafe update asset name: {asset_name!r}")
+    return candidate.name
+
+
 def download_release_asset(
     release: ReleaseInfo,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Path:
-    destination = get_update_downloads_dir() / release.asset_name
+    destination = get_update_downloads_dir() / get_safe_asset_filename(release.asset_name)
 
     try:
         with requests.get(
@@ -173,9 +180,11 @@ def download_release_asset(
                     downloaded += len(chunk)
                     if progress_callback:
                         progress_callback(downloaded, total)
-    except requests.RequestException as exc:
-        if destination.exists():
+    except (requests.RequestException, OSError, ValueError) as exc:
+        try:
             destination.unlink(missing_ok=True)
+        except OSError:
+            logging.exception("Failed to remove partial update download: %s", destination)
         raise UpdateError(f"Failed to download update package: {exc}") from exc
 
     if not destination.exists() or destination.stat().st_size == 0:

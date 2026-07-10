@@ -1,0 +1,64 @@
+name: Build release
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.3.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Verify tag matches application version
+        shell: pwsh
+        run: |
+          $version = python -c "from core.version import __version__; print(__version__)"
+          if ($env:GITHUB_REF_NAME -ne $version.Trim()) {
+            throw "Tag $env:GITHUB_REF_NAME does not match core.version $version"
+          }
+
+      - name: Run quality checks
+        run: |
+          ruff check .
+          python -m pytest -q
+
+      - name: Build Windows application
+        shell: pwsh
+        run: .\build_windows.ps1
+
+      - name: Create release archive
+        shell: pwsh
+        run: |
+          $archive = "StellarisModManager$env:GITHUB_REF_NAME.zip"
+          Compress-Archive -Path "dist\StellarisModManager" -DestinationPath $archive -CompressionLevel Optimal
+          "ASSET_PATH=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create or update GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if (gh release view $env:GITHUB_REF_NAME) {
+            gh release upload $env:GITHUB_REF_NAME $env:ASSET_PATH --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME $env:ASSET_PATH --verify-tag --generate-notes --title $env:GITHUB_REF_NAME
+          }
