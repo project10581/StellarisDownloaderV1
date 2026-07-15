@@ -1,3 +1,4 @@
+import os
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -19,7 +20,8 @@ def test_resolve_safe_mod_delete_target_allows_expected_mod_folder():
     target = root / "123456789"
     target.mkdir(parents=True)
 
-    assert resolve_safe_mod_delete_target(str(root), str(target), "123456789") == target.resolve()
+    expected = Path(os.path.abspath(target))
+    assert resolve_safe_mod_delete_target(str(root), str(target), "123456789") == expected
     temp_dir.cleanup()
 
 
