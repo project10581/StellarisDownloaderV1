@@ -1,10 +1,9 @@
 import argparse
-import logging
 import sys
 import datetime
-from pathlib import Path
 from core.steamcmd import download_mod
 from core.database import ModDatabase
+from core.library_root import switch_library_root
 from core.runtime_paths import configure_logging, get_db_path, get_settings_path
 from core.updater import check_all_mods_for_updates, update_mod, update_all_mods
 from core.settings import SettingsManager
@@ -42,7 +41,7 @@ def resolve_download_root(explicit_root: str = None) -> str:
 def cmd_download(args):
     """Handle download command."""
     try:
-        download_root = resolve_download_root(None)
+        download_root = resolve_download_root(args.download_root)
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -166,9 +165,9 @@ def cmd_set_library_root(args):
     print(f"Setting library root to: {args.path}")
     
     try:
-        settings = SettingsManager(get_settings_path())
-        settings.set_library_root(args.path)
-        print("Library root saved successfully.")
+        result = switch_library_root(get_settings_path(), get_db_path(), args.path)
+        print(f"Library root saved successfully: {result['library_root']}")
+        print(f"Imported mods: {result['imported_count']}")
         sys.exit(0)
     except ValueError as e:
         print(f"Error: {e}")
@@ -201,7 +200,7 @@ def cmd_show_settings(args):
 def cmd_update(args):
     """Handle update command."""
     try:
-        download_root = resolve_download_root(None)
+        download_root = resolve_download_root(args.download_root)
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -227,7 +226,7 @@ def cmd_update(args):
 def cmd_update_all(args):
     """Handle update-all command."""
     try:
-        download_root = resolve_download_root(None)
+        download_root = resolve_download_root(args.download_root)
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -260,6 +259,12 @@ def main():
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+
+    def add_download_root_argument(command_parser):
+        command_parser.add_argument(
+            "--download-root",
+            help="Override the saved library root for this command"
+        )
     
     # Download command
     download_parser = subparsers.add_parser('download', help='Download a mod from Steam Workshop')
@@ -267,6 +272,7 @@ def main():
         "workshop_id",
         help="The Steam Workshop ID of the mod to download"
     )
+    add_download_root_argument(download_parser)
     download_parser.set_defaults(func=cmd_download)
     
     # List command
@@ -283,10 +289,12 @@ def main():
         'workshop_id',
         help='The Steam Workshop ID of the mod to update'
     )
+    add_download_root_argument(update_parser)
     update_parser.set_defaults(func=cmd_update)
 
     # Update-all command
     update_all_parser = subparsers.add_parser('update-all', help='Update all tracked mods with available updates')
+    add_download_root_argument(update_all_parser)
     update_all_parser.set_defaults(func=cmd_update_all)
     
     # Set library root command

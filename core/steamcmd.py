@@ -3,7 +3,13 @@ import logging
 import time
 from pathlib import Path
 from core.database import ModDatabase
-from core.library_root import APP_ID, ensure_junction_target, get_junction_path, get_steamcmd_root
+from core.library_root import (
+    APP_ID,
+    ensure_junction_target,
+    get_junction_path,
+    get_steamcmd_root,
+    path_exists_no_follow,
+)
 from core.workshop_api import fetch_mod_metadata
 
 def classify_steamcmd_output(output: str) -> str:
@@ -31,7 +37,44 @@ def classify_steamcmd_output(output: str) -> str:
     
     return "failed"  # Default to failed if no clear indicators
 
-def download_mod(workshop_id: str, download_root: str, db_path: str) -> dict:
+
+def _record_failed_attempt(
+    db: ModDatabase,
+    workshop_id: str,
+    fallback_content_path: Path,
+    error: str,
+) -> None:
+    """Mark an existing record failed without changing its last successful download time."""
+    existing = db.get_mod(workshop_id)
+    if not existing:
+        # Do not create a tracked mod for an initial download that never
+        # completed. The caller still returns the failure details to the UI.
+        return
+
+    stored = db.upsert_mod(
+        workshop_id=workshop_id,
+        app_id=existing.get("app_id", APP_ID),
+        content_path=existing.get("content_path") or str(fallback_content_path),
+        status="failed",
+        title=existing.get("title"),
+        remote_updated_at=existing.get("remote_updated_at"),
+        description=existing.get("description"),
+        preview_url=existing.get("preview_url"),
+        creator=existing.get("creator"),
+        time_created=existing.get("time_created"),
+        file_size=existing.get("file_size"),
+        last_error=error,
+        last_downloaded_at=existing.get("last_downloaded_at"),
+    )
+    if not stored:
+        logging.error("Failed to store failed-attempt status for mod %s", workshop_id)
+
+def download_mod(
+    workshop_id: str,
+    download_root: str,
+    db_path: str,
+    timeout_seconds: int = 60 * 60,
+) -> dict:
     """
     Downloads a Stellaris mod from Steam Workshop using SteamCMD and tracks it in SQLite.
 
@@ -91,7 +134,7 @@ def download_mod(workshop_id: str, download_root: str, db_path: str) -> dict:
     ]
 
     try:
-        junction_preexisting = get_junction_path().exists()
+        junction_preexisting = path_exists_no_follow(get_junction_path())
         junction_path = ensure_junction_target(download_root)
         junction_created = not junction_preexisting
         junction_verified = junction_path.resolve() == Path(download_root).resolve()
@@ -99,7 +142,7 @@ def download_mod(workshop_id: str, download_root: str, db_path: str) -> dict:
 
         # Run SteamCMD download
         logging.info(f"Starting download for workshop ID: {workshop_id} using {steamcmd_executable}")
-        result = subprocess.run(cmd, capture_output=True, text=False)
+        result = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout_seconds)
 
         # Decode output safely
         stdout_text = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
@@ -128,8 +171,18 @@ def download_mod(workshop_id: str, download_root: str, db_path: str) -> dict:
         # Initialize database and store record
         db = ModDatabase(db_path)
         last_downloaded_at = int(time.time())
+        user_library_path = Path(download_root) / workshop_id
 
         if status == "success":
+            logging.info("Verified downloaded folder for %s at %s", workshop_id, user_library_path)
+            db.upsert_mod(
+                workshop_id=workshop_id,
+                app_id=281990,
+                content_path=str(user_library_path),
+                status="success",
+                last_downloaded_at=last_downloaded_at,
+            )
+
             # Fetch metadata from Steam API
             metadata = fetch_mod_metadata(workshop_id)
             if metadata:
@@ -140,25 +193,22 @@ def download_mod(workshop_id: str, download_root: str, db_path: str) -> dict:
                 creator = metadata.get("creator")
                 time_created = metadata.get("time_created")
                 file_size = metadata.get("file_size")
-            
-            # Compute user library path
-            user_library_path = Path(download_root) / workshop_id
-            
-            # Upsert to database
-            db.upsert_mod(
-                workshop_id=workshop_id,
-                app_id=281990,
-                content_path=str(user_library_path),
-                status="success",
-                title=title,
-                remote_updated_at=remote_updated_at,
-                description=description,
-                preview_url=preview_url,
-                creator=creator,
-                time_created=time_created,
-                file_size=file_size,
-                last_downloaded_at=last_downloaded_at
-            )
+
+                # Upsert metadata after the success record has already cleared stale failures.
+                db.upsert_mod(
+                    workshop_id=workshop_id,
+                    app_id=281990,
+                    content_path=str(user_library_path),
+                    status="success",
+                    title=title,
+                    remote_updated_at=remote_updated_at,
+                    description=description,
+                    preview_url=preview_url,
+                    creator=creator,
+                    time_created=time_created,
+                    file_size=file_size,
+                    last_downloaded_at=last_downloaded_at
+                )
         else:
             # Extract specific error from output
             specific_error = "SteamCMD download or verification failed"
@@ -167,19 +217,8 @@ def download_mod(workshop_id: str, download_root: str, db_path: str) -> dict:
                     if "error" in line.lower():
                         specific_error = line.strip()
                         break
-            
-            # Compute user library path
-            user_library_path = Path(download_root) / workshop_id
-            
-            # Store failed attempt
-            db.upsert_mod(
-                workshop_id=workshop_id,
-                app_id=281990,
-                content_path=str(user_library_path),
-                status="failed",
-                last_error=specific_error,
-                last_downloaded_at=last_downloaded_at
-            )
+
+            _record_failed_attempt(db, workshop_id, user_library_path, specific_error)
             error = specific_error
 
         # Since using junction, user-facing path is the library path
@@ -208,25 +247,50 @@ def download_mod(workshop_id: str, download_root: str, db_path: str) -> dict:
             "stderr": stderr_text,
             "error": error
         }
-    except Exception as e:
-        logging.error(f"Unexpected error downloading mod {workshop_id}: {str(e)}")
+    except subprocess.TimeoutExpired as e:
+        stdout_text = e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        stderr_text = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        error = f"SteamCMD timed out after {timeout_seconds} seconds."
+        logging.error("SteamCMD timed out downloading mod %s", workshop_id)
+        user_library_path = Path(download_root) / workshop_id
         try:
             db = ModDatabase(db_path)
-            db.upsert_mod(
-                workshop_id=workshop_id,
-                app_id=281990,
-                content_path=str(content_path),
-                status="failed",
-                last_error=str(e),
-                last_downloaded_at=int(time.time())
-            )
-        except:
-            pass  # Silent fail on db error during exception handling
+            _record_failed_attempt(db, workshop_id, user_library_path, error)
+        except Exception:
+            logging.exception("Failed to store timeout status for mod %s", workshop_id)
+
+        return {
+            "status": "failed",
+            "workshop_id": workshop_id,
+            "content_path": str(user_library_path),
+            "final_path": None,
+            "folder_exists": False,
+            "folder_nonempty": False,
+            "copied_successfully": False,
+            "junction_created": False,
+            "junction_verified": False,
+            "junction_path": str(content_path.parent),
+            "library_target_path": download_root,
+            "title": None,
+            "remote_updated_at": None,
+            "return_code": -1,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "error": error
+        }
+    except Exception as e:
+        logging.error(f"Unexpected error downloading mod {workshop_id}: {str(e)}")
+        user_library_path = Path(download_root) / workshop_id
+        try:
+            db = ModDatabase(db_path)
+            _record_failed_attempt(db, workshop_id, user_library_path, str(e))
+        except Exception:
+            logging.exception("Failed to store unexpected failure status for mod %s", workshop_id)
         
         return {
             "status": "failed",
             "workshop_id": workshop_id,
-            "content_path": str(content_path),
+            "content_path": str(user_library_path),
             "final_path": None,
             "folder_exists": False,
             "folder_nonempty": False,

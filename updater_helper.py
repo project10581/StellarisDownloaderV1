@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 import logging
+import subprocess
 import shutil
 import sys
 import tempfile
@@ -40,6 +41,13 @@ def wait_for_process_exit(pid: int, timeout_seconds: int = 120) -> None:
 
 def extract_zip_package(zip_path: Path, extract_root: Path) -> Path:
     with zipfile.ZipFile(zip_path, "r") as archive:
+        resolved_root = extract_root.resolve()
+        for member in archive.infolist():
+            target_path = (extract_root / member.filename).resolve()
+            try:
+                target_path.relative_to(resolved_root)
+            except ValueError as exc:
+                raise RuntimeError(f"Unsafe path in update package: {member.filename}") from exc
         archive.extractall(extract_root)
 
     return extract_root
@@ -90,6 +98,47 @@ def restart_app(install_dir: Path, app_exe_name: str) -> None:
         raise RuntimeError(f"Failed to restart the updated app (ShellExecute result: {result}).")
 
 
+def cleanup_downloaded_package(zip_path: Path) -> None:
+    try:
+        if zip_path.exists():
+            zip_path.unlink()
+            logging.info("Deleted downloaded update package: %s", zip_path)
+    except Exception:
+        logging.exception("Failed to delete downloaded update package: %s", zip_path)
+
+
+def schedule_staging_cleanup(staging_root: Path) -> None:
+    try:
+        if not staging_root.exists():
+            return
+        cleanup_script = staging_root.parent / f"cleanup-{staging_root.name}.cmd"
+        cleanup_script.write_text(
+            "\n".join(
+                [
+                    "@echo off",
+                    f'set "TARGET={staging_root}"',
+                    "for /L %%I in (1,1,30) do (",
+                    '  rmdir /s /q "%TARGET%" >nul 2>nul',
+                    '  if not exist "%TARGET%" goto done',
+                    "  ping 127.0.0.1 -n 2 >nul",
+                    ")",
+                    ":done",
+                    'del "%~f0" >nul 2>nul',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        subprocess.Popen(
+            ["cmd", "/c", str(cleanup_script)],
+            cwd=str(cleanup_script.parent),
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        logging.info("Scheduled staging cleanup for %s", staging_root)
+    except Exception:
+        logging.exception("Failed to schedule staging cleanup for %s", staging_root)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--parent-pid", required=True, type=int)
@@ -117,6 +166,8 @@ def main() -> int:
             replace_installation(install_dir, staged_dir)
 
         restart_app(install_dir, args.app_exe_name)
+        cleanup_downloaded_package(zip_path)
+        schedule_staging_cleanup(Path(sys.executable).resolve().parent)
         logging.info("Updater helper completed successfully.")
         return 0
     except Exception as exc:

@@ -6,9 +6,18 @@ from typing import Callable, Dict, List, Optional, Tuple
 from core.database import ModDatabase
 from core.runtime_paths import get_runtime_steamcmd_root
 from core.settings import SettingsManager
-from core.workshop_api import fetch_mod_metadata
+from core.workshop_api import fetch_mod_metadata_batch
 
 APP_ID = 281990
+CACHED_METADATA_FIELDS = (
+    "title",
+    "description",
+    "preview_url",
+    "creator",
+    "time_created",
+    "remote_updated_at",
+    "file_size",
+)
 
 
 def get_steamcmd_root() -> Path:
@@ -31,8 +40,16 @@ def _run_command(command: List[str]) -> subprocess.CompletedProcess:
     return subprocess.run(command, capture_output=True, text=True)
 
 
+def path_exists_no_follow(path: Path) -> bool:
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def is_junction(path: Path) -> bool:
-    if not path.exists():
+    if not path_exists_no_follow(path):
         return False
     result = _run_command(["fsutil", "reparsepoint", "query", str(path)])
     return result.returncode == 0
@@ -45,13 +62,13 @@ def get_junction_target(path: Path) -> Optional[Path]:
 
 
 def remove_junction(path: Path) -> None:
-    if not path.exists():
+    if not path_exists_no_follow(path):
         return
     if not is_junction(path):
         raise ValueError(f"Refusing to remove non-junction path: {path}")
 
     result = _run_command(["cmd", "/c", "rmdir", str(path)])
-    if result.returncode != 0 or path.exists():
+    if result.returncode != 0 or path_exists_no_follow(path):
         stderr = result.stderr.strip() or result.stdout.strip() or "unknown error"
         raise RuntimeError(f"Failed to remove junction {path}: {stderr}")
 
@@ -71,24 +88,29 @@ def ensure_junction_target(library_root: str) -> Path:
     target_path.mkdir(parents=True, exist_ok=True)
 
     junction_path = get_junction_path()
-    if junction_path.exists():
+    if path_exists_no_follow(junction_path):
         if is_junction(junction_path):
             current_target = junction_path.resolve()
-            if current_target != target_path:
-                raise ValueError(
-                    f"Existing SteamCMD junction points to {current_target}, expected {target_path}."
-                )
-            return junction_path
+            if current_target == target_path:
+                return junction_path
 
-        if not junction_path.is_dir():
-            raise ValueError(f"SteamCMD workshop path exists but is not a directory: {junction_path}")
-
-        if any(junction_path.iterdir()):
-            raise ValueError(
-                f"SteamCMD workshop path is a non-empty normal directory: {junction_path}"
+            logging.warning(
+                "Replacing SteamCMD junction %s because it points to %s, expected %s.",
+                junction_path,
+                current_target,
+                target_path,
             )
+            remove_junction(junction_path)
+        else:
+            if not junction_path.is_dir():
+                raise ValueError(f"SteamCMD workshop path exists but is not a directory: {junction_path}")
 
-        junction_path.rmdir()
+            if any(junction_path.iterdir()):
+                raise ValueError(
+                    f"SteamCMD workshop path is a non-empty normal directory: {junction_path}"
+                )
+
+            junction_path.rmdir()
 
     create_junction(junction_path, target_path)
     verified_target = get_junction_target(junction_path)
@@ -115,15 +137,10 @@ def validate_library_root(library_root: Optional[str]) -> Tuple[bool, str]:
         return False, "Library root is not a directory."
 
     junction_path = get_junction_path()
-    if not junction_path.exists():
+    if not path_exists_no_follow(junction_path):
         return True, ""
 
     if is_junction(junction_path):
-        current_target = junction_path.resolve()
-        if current_target != root_path:
-            return False, (
-                f"SteamCMD junction points to {current_target}, not the configured library root."
-            )
         return True, ""
 
     if junction_path.is_dir() and any(junction_path.iterdir()):
@@ -151,6 +168,7 @@ def build_import_records(
     total = len(mod_folders)
     if progress_callback:
         progress_callback(0, total, "scan_started")
+    metadata_by_id = fetch_mod_metadata_batch([child.name for child in mod_folders])
 
     records: List[Dict] = []
     for index, child in enumerate(mod_folders, start=1):
@@ -161,7 +179,7 @@ def build_import_records(
             log_callback(workshop_id)
 
         last_downloaded_at = int(child.stat().st_mtime)
-        metadata = fetch_mod_metadata(workshop_id) or {}
+        metadata = metadata_by_id.get(workshop_id) or {}
 
         records.append({
             "workshop_id": workshop_id,
@@ -182,23 +200,74 @@ def build_import_records(
     return records
 
 
+def summarize_library_changes(previous_records: List[Dict], new_records: List[Dict]) -> Dict:
+    previous_by_id = {
+        str(record.get("workshop_id")): {
+            "workshop_id": str(record.get("workshop_id")),
+            "title": record.get("title"),
+        }
+        for record in previous_records
+    }
+    new_by_id = {
+        str(record.get("workshop_id")): {
+            "workshop_id": str(record.get("workshop_id")),
+            "title": record.get("title"),
+        }
+        for record in new_records
+    }
+    previous_ids = set(previous_by_id)
+    new_ids = set(new_by_id)
+    added_ids = sorted(new_ids - previous_ids)
+    removed_ids = sorted(previous_ids - new_ids)
+    return {
+        "added_ids": added_ids,
+        "removed_ids": removed_ids,
+        "added_mods": [new_by_id[workshop_id] for workshop_id in added_ids],
+        "removed_mods": [previous_by_id[workshop_id] for workshop_id in removed_ids],
+        "added_count": len(added_ids),
+        "removed_count": len(removed_ids),
+    }
+
+
+def merge_cached_metadata(previous_records: List[Dict], new_records: List[Dict]) -> List[Dict]:
+    """Preserve cached metadata when a library scan cannot refresh it from Steam."""
+    previous_by_id = {
+        str(record.get("workshop_id")): record
+        for record in previous_records
+        if record.get("workshop_id") is not None
+    }
+    merged_records = []
+    for record in new_records:
+        merged = dict(record)
+        previous = previous_by_id.get(str(record.get("workshop_id"))) or {}
+        for field in CACHED_METADATA_FIELDS:
+            if merged.get(field) is None and previous.get(field) is not None:
+                merged[field] = previous[field]
+        merged_records.append(merged)
+    return merged_records
+
+
 def rebuild_database_from_library_root(
     db_path: str,
     library_root: str,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     log_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict:
+    db = ModDatabase(db_path)
+    previous_records = db.list_all_mods()
     records = build_import_records(
         library_root,
         progress_callback=progress_callback,
         log_callback=log_callback,
     )
-    db = ModDatabase(db_path)
+    records = merge_cached_metadata(previous_records, records)
+    changes = summarize_library_changes(previous_records, records)
     if not db.replace_all_mods(records):
         raise RuntimeError("Failed to rebuild database from the selected library root.")
     return {
         "imported_count": len(records),
         "records": records,
+        "changes": changes,
     }
 
 
@@ -230,10 +299,11 @@ def switch_library_root(
         return {
             "library_root": str(new_root),
             "imported_count": rebuild_result["imported_count"],
+            "changes": rebuild_result["changes"],
             "changed": False,
         }
 
-    if junction_path.exists() and not is_junction(junction_path):
+    if path_exists_no_follow(junction_path) and not is_junction(junction_path):
         if not junction_path.is_dir() or any(junction_path.iterdir()):
             raise RuntimeError(
                 f"Cannot replace SteamCMD path because it is not a removable junction: {junction_path}"
@@ -241,7 +311,7 @@ def switch_library_root(
         junction_path.rmdir()
 
     try:
-        if junction_path.exists():
+        if path_exists_no_follow(junction_path):
             remove_junction(junction_path)
 
         create_junction(junction_path, new_root)
@@ -261,12 +331,13 @@ def switch_library_root(
         return {
             "library_root": str(new_root),
             "imported_count": rebuild_result["imported_count"],
+            "changes": rebuild_result["changes"],
             "changed": True,
         }
     except Exception:
         logging.exception("Library root switch failed; attempting rollback")
         try:
-            if junction_path.exists() and is_junction(junction_path):
+            if path_exists_no_follow(junction_path) and is_junction(junction_path):
                 remove_junction(junction_path)
         except Exception:
             logging.exception("Failed to remove new junction during rollback")

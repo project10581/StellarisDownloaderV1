@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
@@ -124,7 +125,12 @@ def configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
+            RotatingFileHandler(
+                log_file,
+                maxBytes=1_000_000,
+                backupCount=3,
+                encoding="utf-8",
+            ),
             logging.StreamHandler(),
         ],
         force=True,

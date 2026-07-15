@@ -86,6 +86,30 @@ class SettingsManager:
         settings['refresh_mod_db_on_startup'] = bool(enabled)
         self._save_settings(settings)
         logging.info(f"refresh_mod_db_on_startup set to: {bool(enabled)}")
+
+    def get_check_mod_updates_on_startup(self) -> bool:
+        """Get whether mod updates should be checked on startup."""
+        settings = self._load_settings()
+        return bool(settings.get('check_mod_updates_on_startup', False))
+
+    def set_check_mod_updates_on_startup(self, enabled: bool) -> None:
+        """Set whether mod updates should be checked on startup."""
+        settings = self._load_settings()
+        settings['check_mod_updates_on_startup'] = bool(enabled)
+        self._save_settings(settings)
+        logging.info(f"check_mod_updates_on_startup set to: {bool(enabled)}")
+
+    def get_check_app_updates_on_startup(self) -> bool:
+        """Get whether app updates should be checked on startup."""
+        settings = self._load_settings()
+        return bool(settings.get('check_app_updates_on_startup', False))
+
+    def set_check_app_updates_on_startup(self, enabled: bool) -> None:
+        """Set whether app updates should be checked on startup."""
+        settings = self._load_settings()
+        settings['check_app_updates_on_startup'] = bool(enabled)
+        self._save_settings(settings)
+        logging.info(f"check_app_updates_on_startup set to: {bool(enabled)}")
     
     def get_all_settings(self) -> Dict:
         """Get all settings."""
